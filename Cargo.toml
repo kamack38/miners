@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    ".",
+    "./crates/*"
+]
+
+[package]
+name = "miners"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.10.0"
+log = "0.4.17"
+miners-protocol = { path = "./crates/miners-protocol" }
