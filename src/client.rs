@@ -82,6 +82,7 @@ impl MinecraftClient {
     pub fn start(&mut self) {
         register_all_handlers(self);
         loop {
+            // TODO: Add tick event and a way to stop the handler
             ClientEventDispatcher::dispatch_all(self);
             let packet = self.socket.wait_for_packet();
             if packet.is_err() {

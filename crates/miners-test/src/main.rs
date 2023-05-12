@@ -1,4 +1,4 @@
-use miners::{client::{MinecraftClient, ClientConfig}, events::basic::{SpawnEvent, DeathEvent}, plugins::basic::BasicPlugin};
+use miners::{client::{MinecraftClient, ClientConfig}, events::basic::{SpawnEvent, DeathEvent}, plugins::basic::BasicPlugin, handlers::chat::ChatMessageEvent};
 
 fn main() {
     std::env::set_var("RUST_LOG", "debug");
@@ -10,6 +10,10 @@ fn main() {
         client.on(|client: &mut MinecraftClient, _: &DeathEvent| {
             client.respawn();
             println!("I died, respawning!");
+        });
+
+        client.on(|_client: &mut MinecraftClient, e: &ChatMessageEvent| {
+            println!("Chat message: {:?}", e.message);
         });
     });
     client.start();

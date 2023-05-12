@@ -131,6 +131,12 @@ impl RawPacket {
         byte
     }
 
+    pub fn read_uuid(&mut self) -> u128 {
+        let l1 = self.read_ulong();
+        let l2 = self.read_ulong();
+        ((l1 as u128) << 64) | (l2 as u128)
+    }
+
     /// Reads a VarInt from the packet
     pub fn read_varint(&mut self) -> i32 {
         let mut buf = [0];
