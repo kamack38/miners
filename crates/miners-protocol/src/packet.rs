@@ -1,5 +1,18 @@
 use std::io::Read;
 
+/// Represents a raw packet (id + data)
+/// 
+/// This is the packet that is sent over the network.
+/// Data can be extracted from it using `read_*` methods
+/// as well as written to it using `write_*` methods.
+/// 
+/// # Example
+/// ```rs
+/// let mut packet = RawPacket::empty(0);
+/// packet.write_string("Hello world!");
+/// packet.write_bool(true);
+/// packet.write_varint(123456);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawPacket {
     pub id: i32,
@@ -7,6 +20,7 @@ pub struct RawPacket {
 }
 
 impl RawPacket {
+    /// Creates a new raw packet with given id and data
     pub fn new(id: i32, data: Vec<u8>) -> RawPacket {
         RawPacket {
             id,
@@ -14,6 +28,7 @@ impl RawPacket {
         }
     }
 
+    /// Creates a new empty raw packet with given id and no data
     pub fn empty(id: i32) -> RawPacket {
         RawPacket {
             id,
@@ -21,9 +36,19 @@ impl RawPacket {
         }
     }
 
-    pub fn read_from_socket(socket: &mut std::net::TcpStream, threshold: i32) -> Result<RawPacket, crate::PacketError> {
-        // TODO: Implement compression and encryption
-        // Read length (varint)
+    /// This is mainly used internally to read packets from the socket
+    pub fn read_from_socket(socket: &mut std::net::TcpStream, threshold: i32, non_blocking: bool) -> Result<RawPacket, crate::PacketError> {
+        // TODO: Implement encryption
+
+        // If non_blocking is true, this will return an error if there is no data to read
+        if non_blocking {
+            let mut buf = [0];
+            if socket.peek(&mut buf).is_err() {
+                return Err(crate::PacketError::text("No data to read".to_string()));
+            }
+        }
+
+        // Read packet length (varint)
         let mut length = 0;
         let mut buf = [0];
         for i in 0..4 {
@@ -40,15 +65,17 @@ impl RawPacket {
 
         let mut p = RawPacket::new(0, data);
 
+        // If threshold for compression is set (compression is enabled) read uncompressed length
         let uncompressed_length = if threshold > 0 {
             p.read_varint()
         } else {
             -1
         };
 
+        // Get data from packet
         let data = p.data;
 
-        // Read id
+        // Create new packet with our data (currently without id)
         let mut packet = RawPacket::empty(0);
         if uncompressed_length >= threshold && threshold > 0 {
             // Decompress
@@ -56,10 +83,14 @@ impl RawPacket {
             let mut decompressed = Vec::new();
             d.read_to_end(&mut decompressed)
                 .map_err(|e| crate::PacketError::text(format!("Error decompressing packet: {:?}", e)))?;
+            // Set packet data to decompressed data
             packet.data = decompressed;
         } else {
+            // Set packet data to original data
             packet.data = data;
         }
+        
+        // Set packet id to first varint in packet data
         packet.id = packet.read_varint();
         
         // Return
@@ -67,10 +98,12 @@ impl RawPacket {
     }
 
     // ====< Writers >====
+    /// Writes single byte to the packet
     pub fn write_byte(&mut self, byte: u8) {
         self.data.push(byte);
     }
 
+    /// Writes multiple bytes to the packet
     pub fn write_bytes(&mut self, bytes: Vec<u8>) {
         self.data.extend(bytes);
     }
@@ -107,7 +140,21 @@ impl RawPacket {
         self.write_byte(short as u8);
     }
 
+    /// Writes signed long to the packet
     pub fn write_long(&mut self, long: i64) {
+        // Write long as 8 bytes (from MSB to LSB)
+        self.write_byte((long >> 56) as u8);
+        self.write_byte((long >> 48) as u8);
+        self.write_byte((long >> 40) as u8);
+        self.write_byte((long >> 32) as u8);
+        self.write_byte((long >> 24) as u8);
+        self.write_byte((long >> 16) as u8);
+        self.write_byte((long >> 8) as u8);
+        self.write_byte(long as u8);
+    }
+
+    /// Writes unsigned long to the packet
+    pub fn write_ulong(&mut self, long: u64) {
         // Write long as 8 bytes (from MSB to LSB)
         self.write_byte((long >> 56) as u8);
         self.write_byte((long >> 48) as u8);
@@ -125,16 +172,18 @@ impl RawPacket {
     }
 
     // ====< Readers >====
+    /// Reads a byte from the packet
     pub fn read_byte(&mut self) -> u8 {
         let byte = self.data[0];
         self.data.remove(0);
         byte
     }
 
+    /// Reads a UUID from the packet (as u128)
     pub fn read_uuid(&mut self) -> u128 {
         let l1 = self.read_ulong();
         let l2 = self.read_ulong();
-        ((l1 as u128) << 64) | (l2 as u128)
+        (l1 as u128) | ((l2 as u128) << 64)
     }
 
     /// Reads a VarInt from the packet
@@ -179,6 +228,7 @@ impl RawPacket {
         result
     }
 
+    /// Reads a String from the packet (prefixed with unsigned short instead of default VarInt)
     pub fn read_string_ushort(&mut self) -> String {
         let length = self.read_ushort();
         let mut result = String::new();
@@ -235,6 +285,7 @@ impl RawPacket {
         result
     }
 
+    /// Reads i64 from the packet
     pub fn read_long(&mut self) -> i64 {
         let mut result = self.read_byte() as i64;
         result <<= 8;
@@ -254,6 +305,7 @@ impl RawPacket {
         result
     }
 
+    /// Reads i32 from the packet
     pub fn read_int(&mut self) -> i32 {
         let mut result = self.read_byte() as i32;
         result <<= 8;
@@ -265,6 +317,7 @@ impl RawPacket {
         result
     }
 
+    /// Reads i16 from the packet
     pub fn read_short(&mut self) -> i16 {
         let mut result = self.read_byte() as i16;
         result <<= 8;
@@ -272,6 +325,7 @@ impl RawPacket {
         result
     }
 
+    /// Reads f32 from the packet
     pub fn read_float(&mut self) -> f32 {
         let mut result = self.read_byte() as u32;
         result <<= 8;
@@ -283,6 +337,7 @@ impl RawPacket {
         f32::from_bits(result)
     }
 
+    /// Reads f64 from the packet
     pub fn read_double(&mut self) -> f64 {
         let mut result = self.read_byte() as u64;
         result <<= 8;
@@ -317,6 +372,7 @@ impl RawPacket {
     }
 }
 
+/// Trait for converting a type into a packet (Should be implemented for all packet types that can be sent)
 pub trait IntoPacket {
     fn into_packet(self, protocol_version: i32) -> RawPacket;
 }

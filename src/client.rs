@@ -1,17 +1,37 @@
-use std::{collections::BTreeMap, sync::{Arc, Mutex, RwLock, RwLockWriteGuard, RwLockReadGuard}};
+use std::{collections::BTreeMap, sync::{Arc, Mutex, RwLock, RwLockWriteGuard, RwLockReadGuard}, time::Duration};
 
 use miners_protocol::{RawMinecraftSocket, LoginConfig, packet::RawPacket};
 
 use crate::{events::{ClientEventDispatcher, ClientEvent, basic::SpawnEvent}, handlers::register_all_handlers};
 
+/// Minecraft client, used to connect to the server and handle events as well as packets
+/// It is passed to event handlers as `ClientMutLock` (which is just `Arc<RwLock<MinecraftClient>>`)
+/// 
+/// # Example
+/// ```rust
+/// // Imports...
+/// 
+/// fn main() {
+///    let mut client = MinecraftClient::new(ClientConfig::default());
+///    client.once(|client: ClientMutLock, _: &SpawnEvent| {
+///        let client = client.wl(); // Acquire write lock
+///        client.send_chat_message("Hello, world!".to_string());
+///        client.disconnect();
+///    });
+///    client.start();
+/// }
+/// ```      
 pub struct MinecraftClient {
     pub socket: RawMinecraftSocket,
     pub username: String,
+    pub uuid: u128,
 
     pub(crate) event_dispatcher: ClientEventDispatcher, 
     pub(crate) client_packet_handlers: BTreeMap<i32, Vec<Arc<Mutex<dyn ClientPacketHandler + Send + Sync + 'static>>>>,
 }
 
+/// Client configuration
+/// Contains various options for the client such as username, host and port
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     pub username: String,
@@ -31,6 +51,12 @@ impl Default for ClientConfig {
 
 pub type ClientMutLock = Arc<RwLock<MinecraftClient>>;
 
+impl Into<u128> for MinecraftClient {
+    fn into(self) -> u128 {
+        self.uuid
+    }
+}
+
 impl MinecraftClient {
     /// Creates new client with specified config and connects to the server (blocking)
     pub fn new(client_config: ClientConfig) -> MinecraftClient {
@@ -40,9 +66,11 @@ impl MinecraftClient {
             port: client_config.port,
         }).unwrap();
 
+        let uuid = socket.uuid;
         let mut mc = MinecraftClient {
             socket,
             username: client_config.username,
+            uuid,
 
             event_dispatcher: ClientEventDispatcher::new(),
             client_packet_handlers: BTreeMap::new(),
@@ -95,6 +123,13 @@ impl MinecraftClient {
         }
     }
 
+    /// Disconnects from the server and emits `DisconnectEvent`
+    pub fn disconnect(&mut self) {
+        // TODO: Stop all threads and stuff
+        self.socket.disconnect().ok();
+        self.emit(crate::events::basic::DisconnectEvent);
+    }
+
     /// Starts listening for packets and dispatching events (blocking)
     pub fn start(mut self) {
         register_all_handlers(&mut self);
@@ -104,7 +139,23 @@ impl MinecraftClient {
             ClientEventDispatcher::dispatch_all(_self.clone());
 
             // Handle packets
-            let packet = { _self.read().unwrap().socket.wait_for_packet() };
+            let packet = {
+                loop {
+                    let mut _self = _self.read().unwrap();
+                    match _self.socket.expect_packet() {
+                        Ok(packet) => break Ok(packet),
+                        Err(e) => {
+                            println!("{:?}", e);
+                            if e.get_text() != "No data to read" {
+                                log::error!(target: "miners-client", "Error receiving packet: {:?}", e);
+                                break Err(e);
+                            }
+                        }
+                    }
+                    drop(_self); // Unlock mutex
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
 
             if let Ok(packet) = packet {
                 let _self = _self.clone();
@@ -135,6 +186,7 @@ pub trait ClientLockExt {
     fn rl(&self) -> RwLockReadGuard<MinecraftClient>;
 }
 
+/// ====< Some weird stuff to make life easier >====
 pub(crate) trait ClientPrivateLockExt {
     fn emit_now(&self, e: impl ClientEvent + Send + Sync + 'static);
 }

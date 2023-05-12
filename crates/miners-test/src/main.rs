@@ -1,4 +1,4 @@
-use miners::{client::{MinecraftClient, ClientConfig, ClientMutLock, ClientLockExt}, events::basic::{SpawnEvent, DeathEvent}, plugins::basic::BasicPlugin, handlers::chat::ChatMessageEvent};
+use miners::{client::{MinecraftClient, ClientConfig, ClientMutLock, ClientLockExt}, events::basic::{SpawnEvent, DeathEvent}, plugins::basic::BasicPlugin, handlers::chat::{ChatMessageEvent, ChatMessageSource}};
 
 fn main() {
     std::env::set_var("RUST_LOG", "debug");
@@ -20,8 +20,20 @@ fn main() {
         });
 
         // Wait for chat message event
-        client.on(|_client: ClientMutLock, e: &ChatMessageEvent| {
-            println!("Chat message: {:?}", e.message);
+        client.on(|client: ClientMutLock, e: &ChatMessageEvent| {
+            // Ignore messages sent by this client
+            if e.message.source == (&client).into() {
+                return;
+            }
+            
+            // Print message
+            let mut client = client.wl();
+            client.send_chat_message(format!("You said: {}", e.message.plain_message));
+
+            // Disconnect if message is "leave"
+            if e.message.plain_message == "leave" {
+                client.disconnect();
+            }
         });
     });
     client.start();
