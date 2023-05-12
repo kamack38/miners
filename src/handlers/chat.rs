@@ -1,13 +1,11 @@
-use miners_protocol::handler::PacketHandler;
-
-use crate::{client::ClientPacketHandler, define_events};
+use crate::{client::{ClientPacketHandler, ClientMutLock, ClientLockExt}, define_events};
 
 #[derive(Clone)]
 pub struct ChatHandler;
 
 impl ClientPacketHandler for ChatHandler {
-    fn handle(&self, client: &mut crate::client::MinecraftClient, packet: &miners_protocol::packet::RawPacket) {
-        if client.socket.state != miners_protocol::ConnectionState::Play {
+    fn handle(&self, client: ClientMutLock, packet: &miners_protocol::packet::RawPacket) {
+        if client.get_state() != miners_protocol::ConnectionState::Play {
             return;
         }
 

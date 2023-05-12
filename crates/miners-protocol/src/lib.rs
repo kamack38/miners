@@ -155,7 +155,7 @@ impl RawMinecraftSocket {
         socket.write_all(&length_packet.data)
     }
 
-    pub fn register_handler(&mut self, handler: Box<dyn handler::PacketHandler>) {
+    pub fn register_handler(&mut self, handler: Box<dyn handler::PacketHandler + Send + Sync>) {
         self.handler_manager.lock().unwrap().register(handler);
     }
 

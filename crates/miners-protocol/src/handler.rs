@@ -21,8 +21,8 @@ impl From<std::io::Error> for HandlerError {
 }
 
 pub struct PacketHandlerManager {
-    handlers: BTreeMap<i32, Box<dyn PacketHandler>>,
-    fallback_handler: Option<Box<dyn PacketHandler>>,
+    handlers: BTreeMap<i32, Box<dyn PacketHandler + Send + Sync>>,
+    fallback_handler: Option<Box<dyn PacketHandler + Send + Sync>>,
 }
 
 impl PacketHandlerManager {
@@ -33,7 +33,7 @@ impl PacketHandlerManager {
         }
     }
 
-    pub fn register(&mut self, handler: Box<dyn PacketHandler>) {
+    pub fn register(&mut self, handler: Box<dyn PacketHandler + Send + Sync>) {
         self.handlers.insert(handler.id(), handler);
     }
 
@@ -41,7 +41,7 @@ impl PacketHandlerManager {
         self.handlers.clear();
     }
 
-    pub fn register_fallback(&mut self, handler: Box<dyn PacketHandler>) {
+    pub fn register_fallback(&mut self, handler: Box<dyn PacketHandler + Send + Sync>) {
         self.fallback_handler = Some(handler);
     }
 

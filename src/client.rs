@@ -1,6 +1,6 @@
-use std::{collections::BTreeMap, array::IntoIter, sync::{Arc, Mutex}};
+use std::{collections::BTreeMap, sync::{Arc, Mutex, RwLock, RwLockWriteGuard, RwLockReadGuard}};
 
-use miners_protocol::{RawMinecraftSocket, LoginConfig, handler::PacketHandler, packet::RawPacket};
+use miners_protocol::{RawMinecraftSocket, LoginConfig, packet::RawPacket};
 
 use crate::{events::{ClientEventDispatcher, ClientEvent, basic::SpawnEvent}, handlers::register_all_handlers};
 
@@ -9,7 +9,7 @@ pub struct MinecraftClient {
     pub username: String,
 
     pub(crate) event_dispatcher: ClientEventDispatcher, 
-    pub(crate) client_packet_handlers: Arc<Mutex<BTreeMap<i32, Vec<Box<dyn ClientPacketHandler>>>>>,
+    pub(crate) client_packet_handlers: BTreeMap<i32, Vec<Arc<Mutex<dyn ClientPacketHandler + Send + Sync + 'static>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +29,10 @@ impl Default for ClientConfig {
     }
 }
 
+pub type ClientMutLock = Arc<RwLock<MinecraftClient>>;
+
 impl MinecraftClient {
+    /// Creates new client with specified config and connects to the server (blocking)
     pub fn new(client_config: ClientConfig) -> MinecraftClient {
         let socket = RawMinecraftSocket::login(LoginConfig {
             username: client_config.username.clone(),
@@ -42,7 +45,7 @@ impl MinecraftClient {
             username: client_config.username,
 
             event_dispatcher: ClientEventDispatcher::new(),
-            client_packet_handlers: Arc::new(Mutex::new(BTreeMap::new())),
+            client_packet_handlers: BTreeMap::new(),
         };
 
         mc.emit(SpawnEvent);
@@ -50,60 +53,113 @@ impl MinecraftClient {
         mc
     }
 
-    pub fn once<E: ClientEvent + 'static, F: Fn(&mut MinecraftClient, &E) + 'static>(&mut self, handler: F) {
+    /// Register new event handler that can be called only once (must be `Send + Sync` as it runs in a separate thread)
+    pub fn once<E: ClientEvent + Send + Sync + 'static, F: Fn(ClientMutLock, &E) + Send + Sync + 'static>(&mut self, handler: F) {
         self.event_dispatcher.register_handler_once(handler);
     }
 
-    pub fn on<E: ClientEvent + 'static, F: Fn(&mut MinecraftClient, &E) + 'static>(&mut self, handler: F) {
+    /// Register new event handler (must be `Send + Sync` as it runs in a separate thread)
+    pub fn on<E: ClientEvent + Send + Sync + 'static, F: Fn(ClientMutLock, &E) + Send + Sync + 'static>(&mut self, handler: F) {
         self.event_dispatcher.register_handler(handler);
     }
 
-    pub fn emit<E: ClientEvent + 'static>(&mut self, event: E) {
+    /// Emits event to the client (can be handled using `on` or `once`)
+    pub fn emit<E: ClientEvent + Send + Sync + 'static>(&mut self, event: E) {
         self.event_dispatcher.queue(Box::new(event));
     }
 
-    pub(crate) fn emit_now<E: ClientEvent + 'static>(&mut self, event: E) {
-        self.event_dispatcher.queue(Box::new(event));
-        ClientEventDispatcher::dispatch_all(self);
-    }
-
-    pub fn register_packet_handler<H: ClientPacketHandler + Clone + 'static>(&mut self, handler: H) {
-        let handlers = self.client_packet_handlers.clone();
-        let mut handlers = handlers.lock().unwrap();
-        for id in handler.ids() {
-            if let Some(v) = handlers.get_mut(&id) {
-                v.push(Box::new(handler.clone()));
+    /// Registers new raw packet handler (`ClientPacketHandler`)
+    pub fn register_packet_handler<H: ClientPacketHandler + Send + Sync + 'static>(&mut self, handler: H) {
+        let ids = handler.ids();
+        let handler = Arc::new(Mutex::new(handler));
+        for id in ids {
+            if let Some(v) = self.client_packet_handlers.get_mut(&id) {
+                v.push(handler.clone());
             } else {
-                handlers.insert(*id, vec![Box::new(handler.clone())]);
+                self.client_packet_handlers.insert(*id, vec![handler.clone()]);
             };
         }
     }
 
-    pub fn start(&mut self) {
-        register_all_handlers(self);
+    /// Handle single packet asynchronously
+    pub fn handle_packet(_self: Arc<RwLock<MinecraftClient>>, packet: RawPacket) {
+        let handlers = {
+            let _self = _self.read().unwrap();
+            _self.client_packet_handlers.get(&packet.id).cloned()
+        };
+        if let Some(handlers) = handlers {
+            let handlers = handlers.clone(); // Clone to avoid locking the mutex for too long
+            for handler in handlers {
+                handler.lock().unwrap().handle(_self.clone(), &packet);
+            }
+        }
+    }
+
+    /// Starts listening for packets and dispatching events (blocking)
+    pub fn start(mut self) {
+        register_all_handlers(&mut self);
+        let _self = Arc::new(RwLock::new(self));
         loop {
-            // TODO: Add tick event and a way to stop the handler
-            ClientEventDispatcher::dispatch_all(self);
-            let packet = self.socket.wait_for_packet();
-            if packet.is_err() {
-                log::error!(target: "miners-client", "Error while waiting for packet: {:?}", packet);
+            // Dispatch events
+            ClientEventDispatcher::dispatch_all(_self.clone());
+
+            // Handle packets
+            let packet = { _self.read().unwrap().socket.wait_for_packet() };
+
+            if let Ok(packet) = packet {
+                let _self = _self.clone();
+                MinecraftClient::handle_packet(_self, packet);
+            } else {
+                log::error!(target: "miners-client", "Error receiving packet: {:?}", packet);
                 break;
             }
-            let packet = packet.unwrap();
-
-            let handlers = self.client_packet_handlers.clone();
-            if let Some(handlers) = handlers.lock().unwrap().get(&packet.id) {
-                for handler in handlers {
-                    handler.handle(self, &packet);
-                }
-            } else {
-                // log::warn!(target: "miners-client", "Unhandled packet: {:?}", packet);
-            };
         }
     }
 }
 
 pub trait ClientPacketHandler {
-    fn handle(&self, client: &mut MinecraftClient, packet: &RawPacket);
+    fn handle(&self, client: ClientMutLock, packet: &RawPacket);
     fn ids(&self) -> &'static [i32];
+}
+
+pub trait ClientLockExt {
+    /// Emits event to the client (equivalent to `self.write().unwrap().emit(e)`)
+    fn emit(&self, e: impl ClientEvent + Send + Sync + 'static);
+    
+    /// Returns current connection state (equivalent to `self.read().unwrap().socket.state`)
+    fn get_state(&self) -> miners_protocol::ConnectionState;
+
+    /// Acquires write lock and returns it (equivalent to `self.write().unwrap()`)
+    fn wl(&self) -> RwLockWriteGuard<MinecraftClient>;
+    /// Acquires read lock and returns it (equivalent to `self.read().unwrap()`)
+    fn rl(&self) -> RwLockReadGuard<MinecraftClient>;
+}
+
+pub(crate) trait ClientPrivateLockExt {
+    fn emit_now(&self, e: impl ClientEvent + Send + Sync + 'static);
+}
+
+impl ClientPrivateLockExt for ClientMutLock {
+    fn emit_now(&self, e: impl ClientEvent + Send + Sync + 'static) {
+        self.emit(e);
+        ClientEventDispatcher::dispatch_all(self.clone());
+    }
+}
+
+impl ClientLockExt for ClientMutLock {
+    fn emit(&self, e: impl ClientEvent + Send + Sync + 'static) {
+        self.write().unwrap().emit(e);
+    }
+
+    fn get_state(&self) -> miners_protocol::ConnectionState {
+        self.read().unwrap().socket.state
+    }
+
+    fn wl(&self) -> RwLockWriteGuard<MinecraftClient> {
+        self.write().unwrap()
+    }
+
+    fn rl(&self) -> RwLockReadGuard<MinecraftClient> {
+        self.read().unwrap()
+    }
 }

@@ -1,13 +1,13 @@
 use miners_protocol::packet::RawPacket;
 
-use crate::{define_events, client::ClientPacketHandler, events::basic::DeathEvent};
+use crate::{define_events, client::{ClientPacketHandler, ClientMutLock, ClientLockExt}, events::basic::DeathEvent};
 
 #[derive(Clone)]
 pub struct KeepAliveHandler;
 
 impl ClientPacketHandler for KeepAliveHandler {
-    fn handle(&self, client: &mut crate::client::MinecraftClient, packet: &miners_protocol::packet::RawPacket) {
-        if client.socket.state != miners_protocol::ConnectionState::Play {
+    fn handle(&self, client: ClientMutLock, packet: &miners_protocol::packet::RawPacket) {
+        if client.get_state() != miners_protocol::ConnectionState::Play {
             return;
         }
 
@@ -15,7 +15,7 @@ impl ClientPacketHandler for KeepAliveHandler {
         packet.id = 0x12;
 
         log::debug!(target: "miners-client", "Keep alive packet received: {}", packet.clone().read_long());
-        client.socket.send_packet(packet).ok(); // Send back with new id
+        client.write().unwrap().socket.send_packet(packet).ok(); // Send back with new id
     }
 
     fn ids(&self) -> &'static [i32] {
@@ -29,8 +29,8 @@ define_events!(KeepAlivePacketEvent (id: i64));
 pub struct DeathHandler;
 
 impl ClientPacketHandler for DeathHandler {
-    fn handle(&self, client: &mut crate::client::MinecraftClient, packet: &miners_protocol::packet::RawPacket) {
-        if client.socket.state != miners_protocol::ConnectionState::Play {
+    fn handle(&self, client: ClientMutLock, packet: &miners_protocol::packet::RawPacket) {
+        if client.get_state() != miners_protocol::ConnectionState::Play {
             return;
         }
 

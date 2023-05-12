@@ -34,6 +34,7 @@ impl IntoPacket for HandshakePacket {
         packet.write_string(&self.server_address);
         packet.write_ushort(self.server_port);
         packet.write_varint(self.next_state);
+
         packet
     }
 }
